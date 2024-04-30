@@ -1,0 +1,1036 @@
+---
+title: "STAT 5125 Final Project"
+author: "Christine Nguyen & Salisa Almeida"
+date: "2024-04-30"
+format: html
+editor: visual
+---
+
+# Project: Prediction on Real Estate Conveyance Tax by Town 
+
+Data: [Real Estate Conveyance Tax by Town in CT](https://data.ct.gov/Tax-and-Revenue/Real-Estate-Conveyance-Tax-by-Town/3ghf- ym3x/about_data) (https://data.ct.gov/Tax-and-Revenue/Real-Estate-Conveyance-Tax-by-Town/3ghf- ym3x/about_data)
+
+### Definition
+
+A Conveyance Tax, also known as a Transfer Tax or Stamp Duty in some regions, is a tax imposed on the transfer of real property from one party to another. The tax is typically calculated based on the value of the property being transferred and is payable by the buyer, seller, or both parties involved in the transaction, depending on local regulations and customs. Conveyance taxes are levied by governmental authorities, usually at the state or local level, and the revenue generated from these taxes often contributes to funding various public services and infrastructure projects. The tax rates and regulations governing conveyance taxes can vary widely depending on the jurisdiction, and exemptions or discounts may apply under certain circumstances, such as first-time homebuyers, transfers between family members, or transfers of certain types of property.
+
+### Background: Conveyance Tax in Connecticut
+
+In Connecticut (CT), the conveyance tax is a tax imposed on the transfer of real property. The regulations governing conveyance taxes in Connecticut can be summarized as follows:
+
+1.  Tax Rates: Connecticut imposes a state-level conveyance tax as well as municipal-level conveyance taxes. The last update was the state conveyance tax rate is 0.75% of the property's value for amounts up to \$800,000 and 1.25% for amounts exceeding \$800,000. Municipalities in Connecticut may also levy additional conveyance taxes, which vary depending on the specific municipality.
+2.   Exemptions: Certain transfers of real property may be exempt from conveyance taxes. Common exemptions include transfers between spouses, transfers to or from government entities, transfers to nonprofit organizations, transfers resulting from mergers or consolidations, and transfers of cemetery lots.
+3.  Payment Responsibility: The party responsible for paying the conveyance tax may vary depending on the terms of the real estate transaction and local customs. In some cases, the buyer is responsible for paying the tax, while in others, the seller may be responsible. It's essential for parties involved in real estate transactions to clarify the responsibility for paying conveyance taxes in their agreements.
+
+```{=html}
+<!-- -->
+```
+4.  Penalties for Non-Compliance: Failure to comply with Connecticut's conveyance tax regulations, such as late filing or underpayment of taxes, may result in penalties and interest charges. It's crucial for parties involved in real estate transactions to adhere to the filing requirements and pay the appropriate conveyance taxes to avoid penalties.
+
+These regulations are subject to change, and it's essential to consult with legal and tax professionals or refer to the latest guidance from the Connecticut Department of Revenue Services for the most accurate and up-to-date information on conveyance tax regulations in the state.
+
+## Data Importing
+
+Lets load all the packages and settings!
+
+```{r, message=FALSE}
+library(dplyr)
+library(tidyverse)
+library(ggplot2)
+library(gridExtra)
+library(corrplot)
+library(broom)
+library(tidymodels)
+library(kknn)
+library(ranger)
+theme_set(theme_bw())
+```
+
+The data was found on the CT Data website (https://data.ct.gov/Tax-and-Revenue/Real-Estate- Conveyance-Tax-by-Town/3ghf-ym3x/about_data) made by the Department of Revenue Services. The data is from 2011 to the middle of 2024.
+
+```{r}
+df <- read.csv("Real_Estate_Conveyance_Tax_by_Town_20240410.csv")
+df |>
+  glimpse()
+```
+
+Our data contains 24 columns and 2,052 rows.
+
+## **Data Cleaning**
+
+Lets have a closer look and understanding of our raw data! We'll take a look at missing values after taking a glance at what columns we after working with.
+
+```{r}
+column_list <- colnames(df)
+column_list
+```
+
+Now, which of these columns have missing values?
+
+```{r}
+colSums(is.na(df))
+```
+
+Excluding our target variable, "Total.Consideration.for.Taxable.Conveyances", out of the 23 features available four were not usable as they were missing 75% of their values ("Consideration.for.Residential.Dwelling.Between..800k..2.5M," "Tax.on.Consideration.Between..800k..2.5M.Residential.Dwelling," "Consideration.for.Residential.Dwelling.Over..2.5M.Threshold," and "Tax.on.Consideration.Over..2.5M.Threshold.Residential.Dwelling"). For this reason, we did not impute these 4 features as it could introduce bias, cause misrepresentation of the data, assumptions to be violated, and a misrepresentation of the final analysis results with synthetic data.
+
+We will drop these columns instead.
+
+```{r}
+df <- df |>
+  select(-Consideration.for.Residential.Dwelling.Between..800k..2.5M,
+         -Tax.on.Consideration.Between..800k..2.5M.Residential.Dwelling, 
+         -Consideration.for.Residential.Dwelling.Over..2.5M.Threshold,
+         -Tax.on.Consideration.Over..2.5M.Threshold.Residential.Dwelling)
+```
+
+Now, for "Town.Code" that was showing 20 missing values.
+
+```{r}
+rows_with_missing_values <- which(!complete.cases(df$Town.Code))
+
+df[rows_with_missing_values, ]
+```
+
+After close inspections we found out that in reality this feature was not missing values, it was just coded differently per the data dictionary given on the website. The value "Unknown Town" was coded as 000 and was coming out as a missing value so we recoded it to just be 0 as a character type variable. The "All municipalities" values had no actual value in the data dictionary and also showed up as missing. We created a value of '170' for it as the highest town value was '169'. Now we recode:
+
+```{r}
+df <- df %>%
+  mutate(Town.Code = case_when(
+    Municipality == "ALL MUNICIPALITIES" ~ "170",
+    Municipality == "TOWN UNKNOWN" ~ "0",
+    TRUE ~ as.character(Town.Code)  # Keep the original value for other cases
+  ))
+```
+
+Two other variables, "Consideration for Residential Dwelling Over Threshold" and "Tax on Consideration Over Threshold Residential Dwelling" had a bout 25% in missing values. For these, we decided to do mean imputation below but first we created a column that showed which rows have been imputed by mean:
+
+```{r}
+df$Imputed <- ifelse(is.na(df$Consideration.for.Residential.Dwelling.Over.Threshold) | is.na(df$Tax.on.Consideration.Over.Threshold.Residential.Dwelling), 1, 0)
+```
+
+What are the means of these two columns?
+
+```{r}
+mean(df$Consideration.for.Residential.Dwelling.Over.Threshold, na.rm = TRUE)
+mean(df$Tax.on.Consideration.Over.Threshold.Residential.Dwelling, na.rm = TRUE)
+```
+
+Now, we impute:
+
+```{r}
+df <- df |>
+  mutate(Consideration.for.Residential.Dwelling.Over.Threshold =
+           ifelse(is.na(Consideration.for.Residential.Dwelling.Over.Threshold),
+                  mean(Consideration.for.Residential.Dwelling.Over.Threshold, na.rm = TRUE),
+                  Consideration.for.Residential.Dwelling.Over.Threshold))
+
+df <- df |>
+  mutate(Tax.on.Consideration.Over.Threshold.Residential.Dwelling =
+           ifelse(is.na(Tax.on.Consideration.Over.Threshold.Residential.Dwelling),
+                  mean(Tax.on.Consideration.Over.Threshold.Residential.Dwelling, na.rm = TRUE),
+                  Tax.on.Consideration.Over.Threshold.Residential.Dwelling))
+
+colSums(is.na(df))
+```
+
+We're done cleaning! The dependent variable chosen to be predicted was Total Consideration for Taxable conveyances. (TCTC). In the context of taxation, "Total Consideration" for taxable conveyances refers to the total amount paid or payable for the property or asset being transferred. The Total Consideration is used to determine the taxable amount for conveyance taxes or stamp duties that may apply to the transfer of property or assets. Taxes on conveyances are typically based on a percentage of the total consideration or a flat rate, depending on the jurisdiction and specific tax laws.
+
+## **Data Tidying & Exploratory Data Analysis**
+
+Our data is already in tidy format, let's progress onto EDA!
+
+### The Trend of Total Consideration for Taxable Conveyances by Municipality Over the Fiscal Years
+
+Our initial objective was to examine the behavior of municipalities in terms of Total Consideration for Taxable Conveyances (TCTC) across fiscal years. To address this, we employed a natural logarithm transformation of the TCTC. This transformation linearized relationships that were nonlinear in the original scale, ensuring greater consistency across varying levels of the independent variable(s). We categorized the municipalities into groups of 10 based on their municipality ID (made in alphabetic order), resulting in a total of seven graphical representations for analysis.
+
+**Conclusions**: Municipalities generally exhibit a natural logarithm of CTC ranging from 14 to 20. Cities with lower TCTC tend to be located in less affluent areas, while those with higher starting points are situated in more prosperous regions. The tax charge patterns across plots are quite consistent, showing an upward trend over the years with peaks around the last housing peak in 2020. However, some outliers in behavior are evident, such as the significant drop in the cost of TCTC observed in the cities of Madison and Middlefield in the last year, 2021.
+
+```{r, fig.width=16, fig.height=20}
+par(mfrow = c(9, 2))
+
+# first 10 municipals
+group_municipalities <- df %>%
+  count(Municipality) %>%
+  arrange(desc(n)) %>%
+  .[1:10, "Municipality"] 
+
+plot1 <- df %>%
+  filter(Municipality %in% group_municipalities) %>%
+  mutate(log_total_consideration = log(Total.Consideration.for.Taxable.Conveyances),
+         Fiscal.Year_numeric = as.numeric(substring(Fiscal.Year, 4, 7))) %>%
+  ggplot(aes(x = Fiscal.Year_numeric, y = log_total_consideration, color = Municipality)) +
+  geom_line() +
+  geom_point() +
+  labs(x = "Fiscal Year",
+       y = "Natural Logarithm of Total Consideration for Taxable Conveyances",
+       color = "Municipality")
+
+# next 10 municipals
+group_municipalities <- df %>%
+  count(Municipality) %>%
+  arrange(desc(n)) %>%
+  .[11:20, "Municipality"] 
+
+# Plot with legend trimming
+plot2 <- df %>%
+  filter(Municipality %in% group_municipalities) %>%
+  mutate(log_total_consideration = log(Total.Consideration.for.Taxable.Conveyances),
+         Fiscal.Year_numeric = as.numeric(substring(Fiscal.Year, 4, 7))) %>%
+  ggplot(aes(x = Fiscal.Year_numeric, y = log_total_consideration, color = Municipality)) +
+  geom_line() +
+  geom_point() +
+  labs(x = "Fiscal Year",
+       y = "Natural Logarithm of Total Consideration for Taxable Conveyances",
+       color = "Municipality")
+
+
+# next 10 municipals
+group_municipalities <- df %>%
+  count(Municipality) %>%
+  arrange(desc(n)) %>%
+  .[21:30, "Municipality"] 
+
+# Plot with legend trimming
+plot3 <- df %>%
+  filter(Municipality %in% group_municipalities) %>%
+  mutate(log_total_consideration = log(Total.Consideration.for.Taxable.Conveyances),
+         Fiscal.Year_numeric = as.numeric(substring(Fiscal.Year, 4, 7))) %>%
+  ggplot(aes(x = Fiscal.Year_numeric, y = log_total_consideration, color = Municipality)) +
+  geom_line() +
+  geom_point() +
+  labs(x = "Fiscal Year",
+       y = "Natural Logarithm of Total Consideration for Taxable Conveyances",
+       color = "Municipality")
+
+# next 10 municipals
+group_municipalities <- df %>%
+  count(Municipality) %>%
+  arrange(desc(n)) %>%
+  .[31:40, "Municipality"] 
+
+# Plot with legend trimming
+plot4 <- df %>%
+  filter(Municipality %in% group_municipalities) %>%
+  mutate(log_total_consideration = log(Total.Consideration.for.Taxable.Conveyances),
+         Fiscal.Year_numeric = as.numeric(substring(Fiscal.Year, 4, 7))) %>%
+  ggplot(aes(x = Fiscal.Year_numeric, y = log_total_consideration, color = Municipality)) +
+  geom_line() +
+  geom_point() +
+  labs(x = "Fiscal Year",
+       y = "Natural Logarithm of Total Consideration for Taxable Conveyances",
+       color = "Municipality")
+
+# next 10 municipals
+group_municipalities <- df %>%
+  count(Municipality) %>%
+  arrange(desc(n)) %>%
+  .[41:50, "Municipality"] 
+
+# Plot with legend trimming
+plot5 <- df %>%
+  filter(Municipality %in% group_municipalities) %>%
+  mutate(log_total_consideration = log(Total.Consideration.for.Taxable.Conveyances),
+         Fiscal.Year_numeric = as.numeric(substring(Fiscal.Year, 4, 7))) %>%
+  ggplot(aes(x = Fiscal.Year_numeric, y = log_total_consideration, color = Municipality)) +
+  geom_line() +
+  geom_point() +
+  labs(x = "Fiscal Year",
+       y = "Natural Logarithm of Total Consideration for Taxable Conveyances",
+       color = "Municipality")
+
+# next 10 municipals
+group_municipalities <- df %>%
+  count(Municipality) %>%
+  arrange(desc(n)) %>%
+  .[51:60, "Municipality"] 
+
+# Plot with legend trimming
+plot6 <- df %>%
+  filter(Municipality %in% group_municipalities) %>%
+  mutate(log_total_consideration = log(Total.Consideration.for.Taxable.Conveyances),
+         Fiscal.Year_numeric = as.numeric(substring(Fiscal.Year, 4, 7))) %>%
+  ggplot(aes(x = Fiscal.Year_numeric, y = log_total_consideration, color = Municipality)) +
+  geom_line() +
+  geom_point() +
+  labs(x = "Fiscal Year",
+       y = "Natural Logarithm of Total Consideration for Taxable Conveyances",
+       color = "Municipality")
+
+# next 10 municipals
+group_municipalities <- df %>%
+  count(Municipality) %>%
+  arrange(desc(n)) %>%
+  .[61:70, "Municipality"] 
+
+# Plot with legend trimming
+plot7 <- df %>%
+  filter(Municipality %in% group_municipalities) %>%
+  mutate(log_total_consideration = log(Total.Consideration.for.Taxable.Conveyances),
+         Fiscal.Year_numeric = as.numeric(substring(Fiscal.Year, 4, 7))) %>%
+  ggplot(aes(x = Fiscal.Year_numeric, y = log_total_consideration, color = Municipality)) +
+  geom_line() +
+  geom_point() +
+  labs(x = "Fiscal Year",
+       y = "Natural Logarithm of Total Consideration for Taxable Conveyances",
+       color = "Municipality")
+
+# next 10 municipals
+group_municipalities <- df %>%
+  count(Municipality) %>%
+  arrange(desc(n)) %>%
+  .[71:80, "Municipality"] 
+
+# Plot with legend trimming
+plot8 <- df %>%
+  filter(Municipality %in% group_municipalities) %>%
+  mutate(log_total_consideration = log(Total.Consideration.for.Taxable.Conveyances),
+         Fiscal.Year_numeric = as.numeric(substring(Fiscal.Year, 4, 7))) %>%
+  ggplot(aes(x = Fiscal.Year_numeric, y = log_total_consideration, color = Municipality)) +
+  geom_line() +
+  geom_point() +
+  labs(x = "Fiscal Year",
+       y = "Natural Logarithm of Total Consideration for Taxable Conveyances",
+       color = "Municipality")
+
+# next 10 municipals
+group_municipalities <- df %>%
+  count(Municipality) %>%
+  arrange(desc(n)) %>%
+  .[81:90, "Municipality"] 
+
+# Plot with legend trimming
+plot9 <- df %>%
+  filter(Municipality %in% group_municipalities) %>%
+  mutate(log_total_consideration = log(Total.Consideration.for.Taxable.Conveyances),
+         Fiscal.Year_numeric = as.numeric(substring(Fiscal.Year, 4, 7))) %>%
+  ggplot(aes(x = Fiscal.Year_numeric, y = log_total_consideration, color = Municipality)) +
+  geom_line() +
+  geom_point() +
+  labs(x = "Fiscal Year",
+       y = "Natural Logarithm of Total Consideration for Taxable Conveyances",
+       color = "Municipality")
+
+# next 10 municipals
+group_municipalities <- df %>%
+  count(Municipality) %>%
+  arrange(desc(n)) %>%
+  .[91:100, "Municipality"] 
+
+# Plot with legend trimming
+plot10 <- df %>%
+  filter(Municipality %in% group_municipalities) %>%
+  mutate(log_total_consideration = log(Total.Consideration.for.Taxable.Conveyances),
+         Fiscal.Year_numeric = as.numeric(substring(Fiscal.Year, 4, 7))) %>%
+  ggplot(aes(x = Fiscal.Year_numeric, y = log_total_consideration, color = Municipality)) +
+  geom_line() +
+  geom_point() +
+  labs(x = "Fiscal Year",
+       y = "Natural Logarithm of Total Consideration for Taxable Conveyances",
+       color = "Municipality")
+
+# next 10 municipals
+group_municipalities <- df %>%
+  count(Municipality) %>%
+  arrange(desc(n)) %>%
+  .[101:110, "Municipality"] 
+
+# Plot with legend trimming
+plot11 <- df %>%
+  filter(Municipality %in% group_municipalities) %>%
+  mutate(log_total_consideration = log(Total.Consideration.for.Taxable.Conveyances),
+         Fiscal.Year_numeric = as.numeric(substring(Fiscal.Year, 4, 7))) %>%
+  ggplot(aes(x = Fiscal.Year_numeric, y = log_total_consideration, color = Municipality)) +
+  geom_line() +
+  geom_point() +
+  labs(x = "Fiscal Year",
+       y = "Natural Logarithm of Total Consideration for Taxable Conveyances",
+       color = "Municipality")
+
+# next 10 municipals
+group_municipalities <- df %>%
+  count(Municipality) %>%
+  arrange(desc(n)) %>%
+  .[111:120, "Municipality"] 
+
+# Plot with legend trimming
+plot12 <- df %>%
+  filter(Municipality %in% group_municipalities) %>%
+  mutate(log_total_consideration = log(Total.Consideration.for.Taxable.Conveyances),
+         Fiscal.Year_numeric = as.numeric(substring(Fiscal.Year, 4, 7))) %>%
+  ggplot(aes(x = Fiscal.Year_numeric, y = log_total_consideration, color = Municipality)) +
+  geom_line() +
+  geom_point() +
+  labs(x = "Fiscal Year",
+       y = "Natural Logarithm of Total Consideration for Taxable Conveyances",
+       color = "Municipality")
+
+# next 10 municipals
+group_municipalities <- df %>%
+  count(Municipality) %>%
+  arrange(desc(n)) %>%
+  .[121:130, "Municipality"] 
+
+# Plot with legend trimming
+plot13 <- df %>%
+  filter(Municipality %in% group_municipalities) %>%
+  mutate(log_total_consideration = log(Total.Consideration.for.Taxable.Conveyances),
+         Fiscal.Year_numeric = as.numeric(substring(Fiscal.Year, 4, 7))) %>%
+  ggplot(aes(x = Fiscal.Year_numeric, y = log_total_consideration, color = Municipality)) +
+  geom_line() +
+  geom_point() +
+  labs(x = "Fiscal Year",
+       y = "Natural Logarithm of Total Consideration for Taxable Conveyances",
+       color = "Municipality")
+
+# next 10 municipals
+group_municipalities <- df %>%
+  count(Municipality) %>%
+  arrange(desc(n)) %>%
+  .[131:140, "Municipality"] 
+
+# Plot with legend trimming
+plot14 <- df %>%
+  filter(Municipality %in% group_municipalities) %>%
+  mutate(log_total_consideration = log(Total.Consideration.for.Taxable.Conveyances),
+         Fiscal.Year_numeric = as.numeric(substring(Fiscal.Year, 4, 7))) %>%
+  ggplot(aes(x = Fiscal.Year_numeric, y = log_total_consideration, color = Municipality)) +
+  geom_line() +
+  geom_point() +
+  labs(x = "Fiscal Year",
+       y = "Natural Logarithm of Total Consideration for Taxable Conveyances",
+       color = "Municipality")
+
+# next 10 municipals
+group_municipalities <- df %>%
+  count(Municipality) %>%
+  arrange(desc(n)) %>%
+  .[141:150, "Municipality"] 
+
+# Plot with legend trimming
+plot15 <- df %>%
+  filter(Municipality %in% group_municipalities) %>%
+  mutate(log_total_consideration = log(Total.Consideration.for.Taxable.Conveyances),
+         Fiscal.Year_numeric = as.numeric(substring(Fiscal.Year, 4, 7))) %>%
+  ggplot(aes(x = Fiscal.Year_numeric, y = log_total_consideration, color = Municipality)) +
+  geom_line() +
+  geom_point() +
+  labs(x = "Fiscal Year",
+       y = "Natural Logarithm of Total Consideration for Taxable Conveyances",
+       color = "Municipality")
+
+# next 10 municipals
+group_municipalities <- df %>%
+  count(Municipality) %>%
+  arrange(desc(n)) %>%
+  .[151:160, "Municipality"] 
+
+# Plot with legend trimming
+plot16 <- df %>%
+  filter(Municipality %in% group_municipalities) %>%
+  mutate(log_total_consideration = log(Total.Consideration.for.Taxable.Conveyances),
+         Fiscal.Year_numeric = as.numeric(substring(Fiscal.Year, 4, 7))) %>%
+  ggplot(aes(x = Fiscal.Year_numeric, y = log_total_consideration, color = Municipality)) +
+  geom_line() +
+  geom_point() +
+  labs(x = "Fiscal Year",
+       y = "Natural Logarithm of Total Consideration for Taxable Conveyances",
+       color = "Municipality")
+
+# next 10 municipals
+group_municipalities <- df %>%
+  count(Municipality) %>%
+  arrange(desc(n)) %>%
+  .[161:171, "Municipality"] 
+
+# Plot with legend trimming
+plot17 <- df %>%
+  filter(Municipality %in% group_municipalities) %>%
+  mutate(log_total_consideration = log(Total.Consideration.for.Taxable.Conveyances),
+         Fiscal.Year_numeric = as.numeric(substring(Fiscal.Year, 4, 7))) %>%
+  ggplot(aes(x = Fiscal.Year_numeric, y = log_total_consideration, color = Municipality)) +
+  geom_line() +
+  geom_point() +
+  labs(x = "Fiscal Year",
+       y = "Natural Logarithm of Total Consideration for Taxable Conveyances",
+       color = "Municipality")
+
+grid.arrange(plot1, plot2, 
+             plot3, plot4,
+             plot5, plot6,
+             nrow = 3)
+grid.arrange(plot7, plot8,
+             plot9, plot10,
+             plot11, plot12,
+             nrow = 3)
+grid.arrange(plot13, plot14,
+             plot15, plot16,
+             plot17, nrow = 3)
+```
+
+### Comparison of Total Consideration and Total Amount Due by Fiscal Year
+
+The second analysis sought to explore whether missing payments of the TCTC were affecting the annual growth of taxes, considering the potential ramifications for the fiscal health, economic stability, and governance of both cities and the state. The variable used was the Total Amount Due. Delinquency rates showed an upward trajectory over the years, reaching a peak during the housing market boom between 2020 and 2021. This trend mirrored the pattern observed for TCTC. Upon comparing the amount due with the total TCTC, we confirmed that while the patterns were similar, the outstanding amounts owed by city residents were substantially lower than the total tax levied on the population.
+
+```{r, fig.width=16, fig.height=20}
+par(mfrow = c(3, 1))
+
+plot_amount <- df |>
+  group_by(Fiscal.Year) |>
+  ggplot(aes(x = Total.Amount.Due, y = Fiscal.Year)) +
+  geom_col() +
+  labs(x = "Total Amount Due",
+       y = "Fiscal Year",
+       title = "Total Amount Due by Fiscal Year")
+
+plot_consideration <- df |>
+  group_by(Fiscal.Year) |>
+  ggplot(aes(x = Total.Consideration.for.Taxable.Conveyances, y = Fiscal.Year)) +
+  geom_col() +
+  labs(x = "Total Consideration for Taxable Conveyances",
+       y = "Fiscal Year",
+       title = "Total Consideration for Taxable Conveyances by Fiscal Year")
+
+plot_compare <- df %>%
+  group_by(Fiscal.Year) %>%
+  summarise(Total_Consideration = sum(Total.Consideration.for.Taxable.Conveyances),
+            Total_Amount_Due = sum(Total.Amount.Due)) %>%
+  pivot_longer(cols = c(Total_Consideration, Total_Amount_Due), names_to = "Variable", values_to = "Value") %>%
+  ggplot(aes(x = Value, y = Fiscal.Year, fill = Variable)) +
+  geom_col(position = "dodge", width = 0.5) +
+  labs(x = "Value",
+       y = "Fiscal Year",
+       title = "Comparison of Total Consideration and Total Amount Due by Fiscal Year",
+       fill = "Variable")
+
+grid.arrange(plot_amount,
+             plot_consideration,
+             plot_compare, nrow = 3)
+```
+
+### Deliquent Mortgage Compared to Other Variables
+
+The third analysis continued to focus on missing payments. We did a comparison between mortgage conveyance delinquency (MCD) with TCTC, Total amount due, Total consideration for residential dwelling, residential property other than a dwelling, and nonresidential property other than unimproved land.
+
+-   A mortgage conveyance refers to the legal process of transferring the ownership of property from a borrower (mortgagor) to a lender (mortgagee) as security for a loan. The charge is included as part of the overall costs associated with obtaining a regular mortgage. If the house owner misses a bank mortgage that represents a missed payment of the Conveyance mortgage.
+
+-   "Total consideration for residential dwelling" (TCRD) refers to the total value or price paid for a residential property, including all components of the transaction. This encompasses not only the purchase price of the dwelling itself but also any additional costs or considerations involved in acquiring the property.
+
+-   "Residential property other than dwelling" (RP) refers to residential real estate that is not used primarily as a dwelling or living space by its owner. This category includes residential properties that are used for other purposes, such as rental properties, vacation homes, or investment properties. The values seen on the column are the total prices paid for it.
+
+-   "Nonresidential property other than unimproved land" (NRP) refers to commercial real estate. This category includes a variety of commercial properties used for business, retail, industrial, or other non-residential activities. The values seen on the column are the total prices paid for it.
+
+In our analysis, the variable of interest is "Delinquent Mortgage Conveyance". The total amount due is the total amount MCD owned to the city. The data illustrates a consistent correlation among TCTC, TAD, and TCRD. They tend to cluster together particularly when delinquency rates are low. This suggests that when mortgage ownership is minimal, these variables also remain relatively low. Moreover, the trend aligns with the axis, indicating that as delinquency rates increase, TCTC, TAD, and TCRD decrease, but when delinquency peaks, they rise again. RP and NRP exhibit similar trends as well. There's a discernible negative correlation between these variables and DMC. Higher property prices are associated with lower tax delinquency rates, while lower property prices correlate with increased delinquency.
+
+```{r}
+df |>
+  ggplot(aes(x = Delinquent.Mortgage.Conveyance)) +
+  geom_point(aes(y = Total.Consideration.for.Taxable.Conveyances, color = "Total Consideration for Taxable Conveyances")) +
+  geom_point(aes(y = Total.Amount.Due, color = "Total Amount Due")) +
+  geom_point(aes(y = Total.Consideration.for.Residential.Dwelling, color = "Total Consideration for Residential Dwelling")) +
+  geom_point(aes(y = Residential.Property.Other.Than.Dwelling, color = "Residential Property Other Than Dwelling")) +
+  geom_point(aes(y = Nonresidential.Property.Other.Than.Unimproved.Land, color = "Nonresidential Property Other Than Unimproved Land")) +
+  labs(x = "Delinquent Mortgage Conveyance", 
+       y = "Values", 
+       title = "Comparison of Delinquent Mortgage Conveyance Against Other Variables") +
+  scale_color_manual(name = "Variables", 
+                     values = c("blue", "red", "green", "orange", "purple"),
+                     labels = c("Total Consideration for Taxable Conveyances",
+                                "Total Amount Due",
+                                "Total Consideration for Residential Dwelling",
+                                "Residential Property Other Than Dwelling",
+                                "Nonresidential Property Other Than Unimproved Land"))
+```
+
+### Correlation of All Variables
+
+The fourth analysis focused on assessing the interrelationships between variables. A heatmap was employed to visualize these connections. The heatmap indicates strong correlations among most variables, with the exception of Delinquent Mortgage Conveyance, Number of Taxable Conveyances, Tax on consideration for Residential dwelling over the threshold, and tax on consideration over the threshold of residential dwelling, which exhibits a distinct correlation solely between each other.
+
+```{r, fig.width=15, fig.height=15}
+# Select numeric variables
+numeric_df <- df[, sapply(df, is.numeric)]
+numeric_df <- numeric_df |>
+  select(-Imputed)
+
+# Calculate correlation matrix
+correlation_matrix <- cor(numeric_df)
+
+# Plot correlation matrix as a heatmap
+data = reshape2::melt(correlation_matrix)
+data |>
+  ggplot() +
+  geom_tile(aes(Var2, Var1, fill = value), color = "white") + # Add white border around tiles
+  scale_fill_gradient2(low = "blue", mid = "white", high = "red", midpoint = 0, limits = c(-1,1)) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), 
+        panel.grid.major = element_line(color = "gray", size = 0.5)) + # Add gray grid lines
+  labs(title = "Correlation Matrix", x = "", y = "") +
+  coord_fixed()
+```
+
+### All of the Variables' Values by Fiscal Year
+
+The\\is fifth graph illustrates the relationship between the average value and fiscal year across all variables. The variables can be categorized into two distinct groups based on their patterns. The first group comprises Total Consideration for Residential Dwelling, Total Consideration for Taxable Conveyances, and Consideration for Residential Dwelling Under Threshold. These variables share a similar meaning and exhibit a consistent trend pattern, depicted in the upper part of the graph. Total Consideration for Taxable Conveyances is particularly noteworthy as it represents the maximum consideration amount for property transactions, determining eligibility for benefits or exemptions like reduced taxes. Therefore, it closely follows the trend of Total Consideration for Residential Dwelling, showing an increasing trend over the fiscal years with occasional minor peaks until a significant peak in 2019.
+
+In contrast, the second group of variables displays a flatter trend over fiscal years and is clustered in the lower part of the graph. Nonresidential Property Other Than Unimproved Land and Residential Property Other Than Dwelling stand out within this cluster due to a notable peak in value observed in 2021-22.
+
+Overall, the graph highlights distinct patterns among the variables, with some closely linked and following similar trends, while others exhibit more independent fluctuations over time.
+
+```{r, fig.width=14, fig.height=10, message=FALSE, warning=FALSE}
+# Select numeric variables and exclude 'Municipality' and 'Imputed' columns
+numeric_df <- df %>%
+  select(-Municipality, -Imputed) %>%
+  select_if(is.numeric)
+
+numeric_df$Fiscal.Year <- df$Fiscal.Year
+
+tidy_df <- numeric_df %>%
+  gather(key = "Variable", value = "Value", -Fiscal.Year)
+
+# Calculate average by fiscal year and variable
+average_df <- tidy_df %>%
+  group_by(Fiscal.Year, Variable) %>%
+  summarize(Average = mean(Value))
+
+# Plot line plot
+ggplot(average_df, aes(x = Fiscal.Year, y = Average, color = Variable, group = Variable)) +
+  geom_line(size=1) +
+  geom_point(size=3) +
+  labs(title = "Average of Each Variables by Fiscal Year",
+       x = "Fiscal Year",
+       y = "Average Value")
+```
+
+## Data Pre-processing
+
+Since our target variable is "Total Consideration for Taxable Conveyances," we excluded "Total Amount due" from the analysis because it essentially represents the same concept. Both variables represent total amounts, with the only difference being that one includes the tax amount applied to the total.
+
+```{r}
+model_df <- df |>
+  dplyr::select(!c(Total.Amount.Due))
+```
+
+Fiscal Year, Town Code, Municipality, Imputed, and Total Consideration were excluded from the PCA as they were categorical variables.
+
+```{r}
+pca <- model_df |>
+  dplyr::select(!c(Fiscal.Year, Town.Code, Municipality, Imputed, Total.Consideration.for.Taxable.Conveyances)) |>
+  prcomp(scale = TRUE)
+
+pca$rotation
+```
+
+```{r}
+pca |>
+  tidy(matrix = "pcs")
+```
+
+```{r}
+model_variances <- pca |>
+  tidy(matrix = "pcs")
+
+model_variances |>
+  ggplot(aes(x = factor(PC),
+             y = percent)) + 
+  geom_col()
+```
+
+Following the PCA analysis and scrutinizing the loadings in the rotation matrix, we identified the original variables with the highest absolute values for each principal component. Components one through four showcased several variables with high loadings on specific principal components, signifying their substantial contribution to the variance captured by those components. Consequently, we will incorporate these components into our analysis. PC 1 - 4 in total explained 99.049% of the data's variability.
+
+```{r}
+model_loadings <- pca |>
+  tidy(matrix = "loadings")
+
+model_loadings |>
+  filter(PC <=4) |>
+  ggplot(aes(y = column,
+             x = value)) +
+  geom_col(aes(y = column)
+           ) + 
+  facet_wrap(~PC)
+```
+
+## Modeling
+
+The data was split into 75% training and 25% test sets.
+
+```{r}
+set.seed(1)
+
+# remove imputed column
+new_df <- model_df |>
+  dplyr::select(!c(Imputed))
+
+model_split <- new_df |>
+  initial_split(prop = 0.75,
+                strata = Total.Consideration.for.Taxable.Conveyances)
+
+model_split
+```
+
+```{r}
+model_train <- model_split |>
+  training()
+
+model_test <- model_split |>
+  testing()
+
+model_train |>
+  count()
+
+model_test |> 
+  count()
+```
+
+The models chosen for the analysis were Linear Regression (with 4 PCA, 6 PCA and using all variables), KNN (with 4 PCA, 6PCA and using all variables), and Random Forest (with 4 PCA and using all variables).
+
+### Model 1: Linear Regression With 4 PC
+
+```{r}
+consideration_parsnip_1 <- linear_reg() |> 
+  set_mode("regression") |>
+  set_engine("lm")
+
+consideration_recipe_1 <- recipe(Total.Consideration.for.Taxable.Conveyances ~ .,
+                       data = model_train)
+
+consideration_recipe_1 <- consideration_recipe_1 |> 
+  step_normalize(all_numeric_predictors()) |>
+  step_pca(all_numeric_predictors(), 
+           num_comp = 4) |>
+  step_dummy(all_nominal_predictors())
+
+consideration_workflow_1 <- workflow() |>
+  add_model(consideration_parsnip_1) |>
+  add_recipe(consideration_recipe_1)
+```
+
+### Model 2: Linear Regression With 6 PC
+
+```{r}
+consideration_recipe_2 <- recipe(Total.Consideration.for.Taxable.Conveyances ~ .,
+                       data = model_train)
+
+consideration_recipe_2 <- consideration_recipe_2 |> 
+  step_normalize(all_numeric_predictors()) |>
+  step_pca(all_numeric_predictors(), 
+           num_comp = 6) |>
+  step_dummy(all_nominal_predictors())
+
+consideration_workflow_2 <- workflow() |>
+  add_model(consideration_parsnip_1) |>
+  add_recipe(consideration_recipe_2)
+```
+
+### Model 3: Standard Linear Regression for Comparison
+
+```{r}
+consideration_workflow_3 <- workflow() |>
+  add_model(consideration_parsnip_1) |>
+  add_formula(Total.Consideration.for.Taxable.Conveyances ~ .)
+```
+
+### Model 4: KNN With 4 PCA
+
+```{r}
+consideration_parsnip_2 <- nearest_neighbor() |> 
+  set_mode("regression") |>
+  set_engine("kknn", 
+             neighbors = 5)
+
+consideration_recipe_4 <- recipe(Total.Consideration.for.Taxable.Conveyances ~ .,
+                       data = model_train)
+
+consideration_recipe_4 <- consideration_recipe_4 |> 
+  step_normalize(all_numeric_predictors()) |>
+  step_pca(all_numeric_predictors(), 
+           num_comp = 4) |>
+  step_dummy(all_nominal_predictors())
+
+consideration_workflow_4 <- workflow() |>
+  add_model(consideration_parsnip_2) |>
+  add_recipe(consideration_recipe_4)
+```
+
+### Model 5: Standard KNN for Comparison
+
+```{r}
+consideration_workflow_5 <- workflow() |>
+  add_model(consideration_parsnip_2) |>
+  add_formula(Total.Consideration.for.Taxable.Conveyances ~ .)
+```
+
+### Model 6: Random Forest With 4 PCA
+
+```{r}
+consideration_parsnip_3 <- rand_forest() |> 
+  set_mode("regression") |>
+  set_engine("ranger")
+
+consideration_recipe_6 <- recipe(Total.Consideration.for.Taxable.Conveyances ~ .,
+                       data = model_train)
+
+consideration_recipe_6 <- consideration_recipe_6 |> 
+  step_normalize(all_numeric_predictors()) |>
+  step_pca(all_numeric_predictors(), 
+           num_comp = 4) |>
+  step_dummy(all_nominal_predictors())
+
+consideration_workflow_6 <- workflow() |>
+  add_model(consideration_parsnip_3) |>
+  add_recipe(consideration_recipe_6)
+```
+
+### Model 7: Standard Random Forest for Comparison
+
+```{r}
+consideration_workflow_7 <- workflow() |>
+  add_model(consideration_parsnip_3) |>
+  add_formula(Total.Consideration.for.Taxable.Conveyances ~ .)
+```
+
+### Tibble of Workflows
+
+```{r}
+workflow_names <- c("lm_4PC", 
+                 "lm_6PC",
+                 "lm",
+                 "knn_4PC",
+                 "knn",
+                 "rf_4PC",
+                 "rf")
+
+workflow_objects <- list(consideration_workflow_1,
+                         consideration_workflow_2,
+                         consideration_workflow_3,
+                         consideration_workflow_4,
+                         consideration_workflow_5,
+                         consideration_workflow_6,
+                         consideration_workflow_7)
+
+workflows_tbl <- tibble(work_names = workflow_names,
+                        work_objects = workflow_objects)
+
+workflows_tbl
+```
+
+### Fitting
+
+```{r}
+set.seed(1)
+workflows_tbl <- workflows_tbl |>
+  rowwise() |>
+  mutate(fits = list(fit(work_objects, 
+                         model_train)))
+
+workflows_tbl
+```
+
+```{r}
+workflows_tbl <- workflows_tbl |>
+  mutate(predictions = list(predict(fits,
+                                    model_test)))
+
+workflows_tbl
+```
+
+## **Model Assessment, Interpretation & Selection**
+
+### Predicted Values Against Actual Values Plot
+
+To better visualize the results comparing the predicted values against the actual values across different models we used a plot with a reference line indicating perfect predictions.
+
+```{r, fig.width=16}
+predictions_tbl  <- workflows_tbl |>
+  select(work_names, 
+         predictions) |>
+  unnest(cols = c(predictions))
+
+predictions_tbl <- predictions_tbl |>
+  cbind(Total.Consideration.for.Taxable.Conveyances = model_test |>
+          pull(Total.Consideration.for.Taxable.Conveyances))
+
+predictions_tbl |>
+ ggplot(aes(x = Total.Consideration.for.Taxable.Conveyances, 
+            y = .pred)) +
+  geom_point(alpha = 0.2) +
+  facet_wrap(~work_names, nrow = 4) +
+  geom_abline(slope = 1, linetype = "dotted", color = "red") +
+  coord_obs_pred() # a special coordinate function from the tidymodels family
+```
+
+It helped in assessing the accuracy and performance of the predictive models. The results from the fitting show no difference between the models. They are all clustered over the minimum value with some outliers following the reference line.
+
+### Metric Table
+
+To better assess these results for a comprehensive assessment of model accuracy on test set, fit, and error we used the metric_set function.
+
+```{r}
+consideration_metrics <- metric_set(yardstick::rmse,
+                          yardstick::rsq_trad, 
+                          yardstick::mae)
+```
+
+```{r}
+predictions_metrics <- predictions_tbl |>
+  group_by(work_names) |>
+  consideration_metrics(truth = Total.Consideration.for.Taxable.Conveyances, estimate = .pred)
+
+predictions_metrics
+```
+
+### Metric Plot
+
+-   LM results are not missing, there are just very small values.
+
+```{r, fig.width=14}
+predictions_metrics  |> 
+  ggplot(aes(y = work_names, 
+             x = .estimate, 
+             fill = work_names)) + 
+  geom_col() +
+  facet_wrap(~.metric, 
+             scales = "free_x")
+```
+
+#### RMSE RESULTS
+
+The Root Mean Squared Error (RMSE) measures the average magnitude of the errors between predicted and actual values. Lower RMSE values indicate better predictive performance. The analysis indicates that the Random Forest (RF) model with 4 Principal Components Analysis (PCA) performed the worst in prediction. Both the k-Nearest Neighbors (KNN) model with 4 PCA and the standard KNN model displayed similar outcomes, ranking second in terms of poorer performance. Next in line are the Linear Models (LM) with 4 PCA and without, standard Random Forest model comes as the second best performance and finally demonstrates the best performance overall standard LM.
+
+#### RSQ_TRAD RESULTS 
+
+Traditional R-squared metric measures the proportion of the variance in the dependent variable that is predictable from the independent variables. Higher values indicate better model fit, with 1 being the maximum value. All models performed very similarly and close to one. RF with 4 PCA had the worst prediction but still performed descent.
+
+#### MAE RESULTS
+
+Specifies the Mean Absolute Error (MAE) metric, which measures the average absolute difference between predicted and actual values. Lower values indicate better model performance. The analysis indicates that the Random Forest (RF) model with 4 Principal Components Analysis (PCA) performed the worst in prediction once again. Both the k-Nearest Neighbors (KNN) model with 4 PCA and the standard KNN model displayed similar outcomes (but this time 4 PCA had worse performance), ranking second in terms of poorer performance. Next in line are the Linear Models (LM) with 4 PCA and without, next standard Random Forest model demonstrating the second, and finally standard LM with the best performance overall.
+
+### Concluded Selection
+
+We can conclude that for the performance on the predicted values against the actual values, standard LM was the best predictor followed by LM with 6 PCA and LM with 4PCA. The worst performance was Random Forest with 4 PCA.
+
+## **Uncertainty Quantification**
+
+### Bootstrap
+
+We employed the Bootstrap technique with 5 iterations to estimate standard errors, construct confidence intervals, perform hypothesis tests, and assess the stability of model parameters. We opted for PCA models exclusively due to multicollinearity concerns associated with Bootstrap. By extracting the mean, we gained insight into the anticipated average performance of our models or estimators.
+
+```{r}
+set.seed(1)
+
+pc_workflows_tbl <- workflows_tbl |>
+  filter(grepl("PC", work_names)) #choosing only PC models because multicollinearity issue for boostrap
+
+bootstrap_set <- model_train  |>
+  bootstraps(times = 5)
+
+workflows_bootstrap <- pc_workflows_tbl |>
+  mutate(fits = list(fit_resamples(work_objects,
+                                         bootstrap_set,
+                                         metrics = consideration_metrics))) |>
+  mutate(metrics = list(collect_metrics(fits)))
+
+workflows_bootstrap
+```
+
+```{r}
+workflows_boot_results <- workflows_bootstrap |>
+  select(work_names,
+         metrics) |>
+  unnest(metrics) |>
+  select(work_names,
+         mean) |>
+  arrange(work_names)
+
+workflows_boot_results
+```
+
+Interestingly, across all models, performance was consistently better on the second sample, followed by the first, and then declined on the third. Notably, both the KNN with 4 PCA and RF with 4 PCA models exhibited minimal variability in performance across the samples, indicating robustness in their predictive capabilities.
+
+### Held Out Test Set
+
+In the last uncertainty quantification, we used a Validation set from splitting our training data again for both fitting and assessing our models. The means of MAE, RMSE, and RSQ_TRAD were used to check the performance of the models. The overall performance is very similar to the test performance.
+
+```{r}
+set.seed(1)
+val_set <- validation_split(model_train, 
+                            prop = 0.75, 
+                            strata = Total.Consideration.for.Taxable.Conveyances)
+val_set |>
+  class()
+```
+
+```{r}
+workflows_val <- workflows_tbl |>
+  mutate(fits = list(fit_resamples(work_objects,
+                                   val_set,
+                                   metrics = consideration_metrics))) |>
+  mutate(metrics = list(collect_metrics(fits)))
+
+workflows_val
+```
+
+```{r}
+workflows_val |>
+  select(c(work_names,
+           metrics)) |>
+  unnest(metrics) |>
+  arrange(.metric)
+```
+
+```{r}
+workflows_val |>
+  select(c(work_names,
+           metrics)) |>
+  unnest(metrics)
+
+workflows_val |>
+  select(c(work_names,
+           metrics)) |>
+  unnest(metrics) |>
+  ggplot(aes(y = work_names,
+             fill = work_names,
+             x = mean)) +
+  geom_col() +
+  facet_wrap(~.metric,
+             nrow = 3)
+```
+
+-   rsq_trad graph is not missing, it is just super small.
+
+#### RMSE RESULTS 
+
+As we are using the mean, lower mean values indicate better predictive performance. The analysis indicates that the Random Forest (RF) model with 4 Principal Components Analysis (PCA) performed the worst in prediction. Both the k-Nearest Neighbors (KNN) model with 4 PCA and the standard KNN model displayed similar outcomes, ranking second in terms of poorer performance with standard KNN as the worst among them. Next in line is standard RF than Linear Models (LM) with 4 PCA and 6 PCA, finally demonstrating the best performance overall of the standard LM.
+
+#### RSQ_TRAD RESULTS 
+
+For RSQ higher mean values indicate better model fit. All models performed very similarly and have very low means.
+
+#### MAE RESULTS 
+
+Once more, lower mean values indicate better model performance. The analysis indicates that the KNN 4 PCA performed the worst in prediction followed by standard KNN and RF 4 PCA. Fourth place in worse prediction was standard RF followed by LM 4 PCA and LM 6 PCA. The best prediction performance was the standard LM.
+
+We can conclude that for the performance using the validation set the standard LM was the best predictor followed by LM with 6 PCA and LM with 4PCA. The worst performance was Random Forest with 4 PCA.
+
+## FINAL THOUGHTS 
+
+Overall, our analysis encompassed the evaluation of several models, including Linear Regression (LM), k-Nearest Neighbors (KNN), and Random Forest (RF), with variations in Principal Components Analysis (PCA) and variable selection. We examined their performance metrics, such as Root Mean Squared Error (RMSE), Traditional R-squared (RSQ_TRAD), and Mean Absolute Error (MAE), both on held-out test sets and validation sets. Additionally, we employed bootstrapping to estimate standard errors and assess model stability.
+
+Across various assessments, including test set and validation set evaluations, the standard LM consistently emerged as the top-performing model, showcasing the best predictive accuracy and overall performance. Specifically, models utilizing PCA, particularly LM with 6 PCA and LM with 4 PCA, demonstrated competitive performance, albeit slightly trailing behind the standard LM. Conversely, models employing RF with 4 PCA consistently exhibited poorer predictive performance, indicating potential limitations in capturing the underlying patterns in the data.
+
+Furthermore, bootstrapping analysis provided insights into the variability and stability of model predictions across different samples. Notably, both KNN with 4 PCA and RF with 4 PCA exhibited minimal variability in performance with lower overall performance compared to LM- based models.
+
+Usually, Random forest performs very well in any type of data. The probable reason for a poor performance in this data could be possibly for two reasons. RF models work better for a nonlinear relationship and in unbalanced data. This data is very balanced and has a very strong linear relationship. It has some presence of outliers but they did not affect even the most sensitive model that is LM.
+
+In conclusion, for this specific dataset and analysis, even with the presence of outliers, the standard LM model, along with LM with 6 PCA and LM with 4 PCA, emerged as the most reliable predictors, showcasing superior predictive accuracy and stability. Conversely, models utilizing RF with 4 PCA consistently demonstrated poorer performance, indicating potential areas for improvement or exploration in future analyses.
+
+### Add-Ons We Used:
+
+-   Performed Principal Component Analysis
+
+-   Imputed missing data
+
+-   Made use of a list column during our analysis
+
+-   Made a github repository for our project ([Github Repo](https://github.com/ChristineN021/STAT5125_Final_Project))
+
+-   Included more than one form of uncertainty quantification from the bulleted list
